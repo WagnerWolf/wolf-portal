@@ -300,7 +300,7 @@ Exemplo:
 
 ```sh
 cd /home/wolf
-git clone <URL-DO-REPOSITORIO> wolf-portal
+git clone https://github.com/WagnerWolf/wolf-portal.git wolf-portal
 cd wolf-portal
 ```
 
