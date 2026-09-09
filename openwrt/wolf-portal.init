@@ -1,0 +1,223 @@
+#!/bin/sh /etc/rc.common
+
+USE_PROCD=1
+
+START=95
+STOP=10
+
+
+# ================================================================
+# WOLF PORTAL
+# ================================================================
+
+APP_ROOT="/usr/lib/wolf-portal"
+
+PYTHON="/usr/bin/python3"
+
+CONFIG_DIR="/etc/wolf-portal"
+DATA_DIR="${CONFIG_DIR}/data"
+
+TELEGRAM_CONFIG="${CONFIG_DIR}/telegram.conf"
+
+DATABASE="${DATA_DIR}/wolf-portal.db"
+TELEGRAM_STATE="${DATA_DIR}/telegram-bot-state.json"
+
+PORTAL_HOST="0.0.0.0"
+PORTAL_PORT="81"
+
+SCAN_INTERVAL="3"
+
+
+# ================================================================
+# PRÉ-REQUISITOS
+# ================================================================
+
+check_environment()
+{
+    if [ ! -x "$PYTHON" ]; then
+        echo "Wolf Portal: Python não encontrado em $PYTHON"
+        return 1
+    fi
+
+    if [ ! -d "$APP_ROOT/app" ]; then
+        echo "Wolf Portal: aplicação não encontrada em $APP_ROOT/app"
+        return 1
+    fi
+
+    if [ ! -f "$APP_ROOT/app/main.py" ]; then
+        echo "Wolf Portal: main.py não encontrado."
+        return 1
+    fi
+
+    if [ ! -f "$APP_ROOT/app/portal_server.py" ]; then
+        echo "Wolf Portal: portal_server.py não encontrado."
+        return 1
+    fi
+
+    if [ ! -f "$APP_ROOT/app/telegram_bot.py" ]; then
+        echo "Wolf Portal: telegram_bot.py não encontrado."
+        return 1
+    fi
+
+    mkdir -p "$DATA_DIR" || return 1
+
+    chmod 700 "$CONFIG_DIR"
+    chmod 700 "$DATA_DIR"
+
+    return 0
+}
+
+
+# ================================================================
+# BANCO
+# ================================================================
+
+initialize_database()
+{
+    (
+        cd "$APP_ROOT" || exit 1
+
+        export PYTHONPATH="$APP_ROOT"
+        export PYTHONUNBUFFERED="1"
+        export WOLF_PORTAL_DATABASE="$DATABASE"
+
+        exec "$PYTHON" -u -c \
+            'from app.database import initialize_database; initialize_database()'
+    )
+}
+
+
+# ================================================================
+# MONITOR
+# ================================================================
+
+start_monitor()
+{
+    procd_open_instance "monitor"
+
+    procd_set_param command \
+        "$PYTHON" \
+        -u \
+        -m \
+        app.main
+
+    procd_set_param env \
+        "PYTHONPATH=$APP_ROOT" \
+        "PYTHONUNBUFFERED=1" \
+        "WOLF_PORTAL_DATABASE=$DATABASE" \
+        "WOLF_PORTAL_SCAN_INTERVAL=$SCAN_INTERVAL"
+
+    procd_set_param respawn \
+        3600 \
+        5 \
+        5
+
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+
+    procd_set_param term_timeout 10
+
+    procd_close_instance
+}
+
+
+# ================================================================
+# PORTAL HTTP
+# ================================================================
+
+start_portal()
+{
+    procd_open_instance "portal"
+
+    procd_set_param command \
+        "$PYTHON" \
+        -u \
+        -m \
+        app.portal_server \
+        --host \
+        "$PORTAL_HOST" \
+        --port \
+        "$PORTAL_PORT"
+
+    procd_set_param env \
+        "PYTHONPATH=$APP_ROOT" \
+        "PYTHONUNBUFFERED=1" \
+        "WOLF_PORTAL_DATABASE=$DATABASE"
+
+    procd_set_param respawn \
+        3600 \
+        5 \
+        5
+
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+
+    procd_set_param term_timeout 10
+
+    procd_close_instance
+}
+
+
+# ================================================================
+# TELEGRAM
+# ================================================================
+
+start_telegram()
+{
+    if [ ! -f "$TELEGRAM_CONFIG" ]; then
+        logger -t wolf-portal \
+            "Telegram desabilitado: configuração não encontrada em $TELEGRAM_CONFIG"
+
+        return 0
+    fi
+
+    chmod 600 "$TELEGRAM_CONFIG"
+
+    procd_open_instance "telegram"
+
+    procd_set_param command \
+        "$PYTHON" \
+        -u \
+        -m \
+        app.telegram_bot
+
+    procd_set_param env \
+        "PYTHONPATH=$APP_ROOT" \
+        "PYTHONUNBUFFERED=1" \
+        "WOLF_PORTAL_DATABASE=$DATABASE" \
+        "WOLF_PORTAL_TELEGRAM_CONFIG=$TELEGRAM_CONFIG" \
+        "WOLF_PORTAL_TELEGRAM_STATE=$TELEGRAM_STATE"
+
+    procd_set_param respawn \
+        3600 \
+        5 \
+        5
+
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+
+    procd_set_param term_timeout 10
+
+    procd_close_instance
+}
+
+
+# ================================================================
+# START
+# ================================================================
+
+start_service()
+{
+    check_environment || return 1
+
+    # Inicializa/verifica o banco antes de iniciar as três
+    # instâncias do Wolf Portal.
+    initialize_database || {
+        echo "Wolf Portal: falha ao inicializar banco."
+        return 1
+    }
+
+    start_monitor
+    start_portal
+    start_telegram
+}

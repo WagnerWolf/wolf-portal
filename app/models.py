@@ -1,0 +1,23 @@
+from enum import Enum
+
+
+class DeviceStatus(str, Enum):
+    PENDING = "PENDING"
+    AUTHORIZED = "AUTHORIZED"
+    BLOCKED = "BLOCKED"
+    DISABLED = "DISABLED"
+
+
+class EventType(str, Enum):
+    DEVICE_DETECTED = "DEVICE_DETECTED"
+    DEVICE_IMPORTED = "DEVICE_IMPORTED"
+    DEVICE_AUTHORIZED = "DEVICE_AUTHORIZED"
+    DEVICE_BLOCKED = "DEVICE_BLOCKED"
+    DEVICE_DISABLED = "DEVICE_DISABLED"
+    DEVICE_REAUTHORIZED = "DEVICE_REAUTHORIZED"
+    HOSTNAME_CHANGED = "HOSTNAME_CHANGED"
+    IP_CHANGED = "IP_CHANGED"
+
+    # Gerado quando um cliente PENDING usa a página pública
+    # para solicitar acesso à rede.
+    ACCESS_REQUESTED = "ACCESS_REQUESTED"
