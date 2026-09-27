@@ -65,7 +65,7 @@ BOT_COMMANDS = [
     {"command": "bloquear", "description": "Bloquear um dispositivo por MAC"},
     {"command": "nomear", "description": "Definir o nome de um dispositivo"},
     {"command": "ajuda", "description": "Mostrar comandos disponíveis"},
-    {"command": "conectados","description": "Listar dispositivos conectados",},
+    {"command": "conectados","description": "Listar dispositivos conectados"},
 ]
 
 RUNNING = True
