@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+from app.network_monitor import NetworkMonitor
 import html
 import json
 import os
@@ -65,6 +65,7 @@ BOT_COMMANDS = [
     {"command": "bloquear", "description": "Bloquear um dispositivo por MAC"},
     {"command": "nomear", "description": "Definir o nome de um dispositivo"},
     {"command": "ajuda", "description": "Mostrar comandos disponíveis"},
+    {"command": "conectados","description": "Listar dispositivos conectados",},
 ]
 
 RUNNING = True
@@ -206,6 +207,145 @@ API_URL = (
     f"https://api.telegram.org/bot{TOKEN}"
 )
 
+
+CONNECTED_NEIGHBOR_STATES = {
+    "REACHABLE",
+    "STALE",
+    "DELAY",
+    "PROBE",
+}
+
+
+def get_connected_devices() -> list[dict]:
+    """
+    Retorna uma fotografia dos dispositivos atualmente
+    conhecidos na LAN através da tabela neighbor do kernel.
+
+    Para esta consulta consideramos ativos:
+
+        REACHABLE
+        STALE
+        DELAY
+        PROBE
+
+    FAILED e INCOMPLETE não são considerados conectados.
+    """
+
+    monitor = NetworkMonitor()
+
+    devices_by_mac: dict[str, dict] = {}
+
+    # Preferência caso o mesmo MAC apareça mais de uma vez.
+    state_priority = {
+        "REACHABLE": 4,
+        "DELAY": 3,
+        "PROBE": 2,
+        "STALE": 1,
+    }
+
+    for neighbor in monitor.get_neighbors():
+
+        if not neighbor.mac:
+            continue
+
+        state = neighbor.state.upper()
+
+        if state not in CONNECTED_NEIGHBOR_STATES:
+            continue
+
+        mac = normalize_mac(
+            neighbor.mac
+        )
+
+        previous = devices_by_mac.get(
+            mac
+        )
+
+        if previous is not None:
+
+            if (
+                state_priority.get(
+                    previous["neighbor_state"],
+                    0,
+                )
+                >=
+                state_priority.get(
+                    state,
+                    0,
+                )
+            ):
+                continue
+
+        devices_by_mac[mac] = {
+            "mac": mac,
+            "ip": neighbor.ip,
+            "neighbor_state": state,
+            "hostname": None,
+            "status": None,
+        }
+
+    if not devices_by_mac:
+        return []
+
+    macs = list(
+        devices_by_mac.keys()
+    )
+
+    placeholders = ",".join(
+        "?"
+        for _ in macs
+    )
+
+    with get_connection() as conn:
+
+        rows = conn.execute(
+            f"""
+            SELECT
+                mac,
+                hostname,
+                status
+            FROM devices
+            WHERE lower(mac) IN ({placeholders})
+            """,
+            macs,
+        ).fetchall()
+
+    for row in rows:
+
+        mac = normalize_mac(
+            row["mac"]
+        )
+
+        device = devices_by_mac.get(
+            mac
+        )
+
+        if device is None:
+            continue
+
+        device["hostname"] = (
+            row["hostname"]
+        )
+
+        device["status"] = (
+            row["status"]
+        )
+
+    devices = list(
+        devices_by_mac.values()
+    )
+
+    devices.sort(
+        key=lambda device: (
+            (
+                device["hostname"]
+                or ""
+            ).lower(),
+            device["mac"],
+        )
+    )
+
+    return devices
 
 # ================================================================
 # ESTADO PERSISTENTE DO BOT
@@ -1099,7 +1239,8 @@ def command_help() -> None:
         "⏳ <code>/pendentes</code>\n"
         "📋 <code>/autorizados</code>\n"
         "ℹ️ <code>/status</code>\n"
-        "❓ <code>/ajuda</code>"
+        "❓ <code>/ajuda</code>\n"
+        "📶 <code>/conectados</code>"
     )
 
 
@@ -1107,12 +1248,87 @@ def command_status() -> None:
 
     counts = get_status_counts()
 
+    connected = get_connected_devices()
+
     send_message(
         f"ℹ️ <b>Status {html.escape(HOST_NAME)}</b>\n\n"
         f"✅ Autorizados: {counts.get('AUTHORIZED', 0)}\n"
         f"⏳ Pendentes: {counts.get('PENDING', 0)}\n"
         f"⛔ Bloqueados: {counts.get('BLOCKED', 0)}\n"
-        f"🚫 Desativados: {counts.get('DISABLED', 0)}"
+        f"🚫 Desativados: {counts.get('DISABLED', 0)}\n"
+        f"📶 Conectados agora: {len(connected)}"
+    )
+
+
+def command_connected() -> None:
+
+    devices = get_connected_devices()
+
+    if not devices:
+
+        send_message(
+            "📶 Nenhum dispositivo conectado foi detectado."
+        )
+
+        return
+
+    lines = [
+        "📶 <b>Dispositivos conectados</b>",
+        "",
+        f"Total: <b>{len(devices)}</b>",
+        "",
+    ]
+
+    status_icons = {
+        "AUTHORIZED": "✅",
+        "PENDING": "⏳",
+        "BLOCKED": "⛔",
+        "DISABLED": "🚫",
+    }
+
+    for device in devices:
+
+        name = html.escape(
+            device["hostname"]
+            or "Sem nome"
+        )
+
+        mac = html.escape(
+            device["mac"]
+        )
+
+        ip = html.escape(
+            device["ip"]
+            or "-"
+        )
+
+        status = (
+            device["status"]
+            or "NÃO CADASTRADO"
+        )
+
+        icon = status_icons.get(
+            status,
+            "❔",
+        )
+
+        lines.extend(
+            [
+                f"👤 <b>{name}</b>",
+                f"<code>{mac}</code>",
+                f"IP: <code>{ip}</code>",
+                (
+                    f"Status: {icon} "
+                    f"{html.escape(status)}"
+                ),
+                "",
+            ]
+        )
+
+    send_message(
+        "\n".join(
+            lines
+        )
     )
 
 
@@ -1433,6 +1649,9 @@ def process_message(
 
     elif command_base == "/status":
         command_status()
+
+    elif command_base == "/conectados":
+        command_connected()
 
     elif command_base == "/autorizados":
         command_authorized()

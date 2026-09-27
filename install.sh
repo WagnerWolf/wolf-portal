@@ -368,49 +368,313 @@ fi
 
 
 # ------------------------------------------------
-# Compatibilidade com configuração antiga
+# CONFIGURAÇÃO TELEGRAM
+# ------------------------------------------------
+#
+# O Telegram é parte essencial do gerenciamento do Wolf Portal.
+#
+# Ordem utilizada:
+#
+#   1. preserva configuração já existente;
+#   2. migra configuração legada, se houver;
+#   3. aceita configuração por variáveis de ambiente;
+#   4. em instalação interativa, solicita TOKEN e ADMIN_ID.
+#
+# Em instalação não interativa, TOKEN e ADMIN_ID devem ser
+# fornecidos através de:
+#
+#   WOLF_PORTAL_TELEGRAM_TOKEN
+#   WOLF_PORTAL_TELEGRAM_ADMIN_ID
 # ------------------------------------------------
 
-if [ ! -f "$TELEGRAM_CONFIG" ] &&
-   [ -f "${SCRIPT_DIR}/app/bot_telegram.conf" ]; then
+validate_telegram_token()
+{
+    VALUE="$1"
 
-    echo "Migrando configuração Telegram antiga..."
+    # Formato esperado:
+    #
+    #   <id-numérico>:<segredo>
+    #
+    # O segredo do Telegram utiliza caracteres alfanuméricos,
+    # "_" e "-".
+    case "$VALUE" in
+        *:*)
+            TOKEN_PREFIX="${VALUE%%:*}"
+            TOKEN_SECRET="${VALUE#*:}"
+            ;;
 
-    cp \
-        "${SCRIPT_DIR}/app/bot_telegram.conf" \
-        "$TELEGRAM_CONFIG"
-fi
+        *)
+            return 1
+            ;;
+    esac
+
+    case "$TOKEN_PREFIX" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+
+    case "$TOKEN_SECRET" in
+        ''|*[!A-Za-z0-9_-]*)
+            return 1
+            ;;
+    esac
+
+    return 0
+}
 
 
-# ------------------------------------------------
-# Configuração Telegram via ambiente
-# ------------------------------------------------
+validate_telegram_admin_id()
+{
+    VALUE="$1"
 
-if [ ! -f "$TELEGRAM_CONFIG" ]; then
+    # Aceita IDs numéricos positivos e negativos.
+    case "$VALUE" in
+        -*)
+            VALUE="${VALUE#-}"
+            ;;
+    esac
 
-    if [ -n "${WOLF_PORTAL_TELEGRAM_TOKEN:-}" ] &&
-       [ -n "${WOLF_PORTAL_TELEGRAM_ADMIN_ID:-}" ]; then
+    case "$VALUE" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+
+    return 0
+}
+
+
+write_telegram_config()
+{
+    TOKEN_VALUE="$1"
+    ADMIN_ID_VALUE="$2"
+
+    (
+        umask 077
 
         cat > "$TELEGRAM_CONFIG" <<EOF
-TOKEN="${WOLF_PORTAL_TELEGRAM_TOKEN}"
-ADMIN_ID="${WOLF_PORTAL_TELEGRAM_ADMIN_ID}"
+TOKEN="${TOKEN_VALUE}"
+ADMIN_ID="${ADMIN_ID_VALUE}"
 EOF
+    )
 
-        echo "Configuração Telegram criada."
+    chmod 600 "$TELEGRAM_CONFIG"
+}
+
+
+telegram_config_is_valid()
+{
+    CONFIG_FILE="$1"
+
+    TELEGRAM_CONFIG_CHECK="$CONFIG_FILE"     python3 - <<'PY'
+import os
+import re
+from pathlib import Path
+
+
+path = Path(
+    os.environ["TELEGRAM_CONFIG_CHECK"]
+)
+
+if not path.is_file():
+    raise SystemExit(1)
+
+
+config = {}
+
+for raw_line in path.read_text(
+    encoding="utf-8"
+).splitlines():
+
+    line = raw_line.strip()
+
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+
+    key, value = line.split(
+        "=",
+        1,
+    )
+
+    key = key.strip()
+    value = value.strip()
+
+    if (
+        len(value) >= 2
+        and value[0] == value[-1]
+        and value[0] in ("'", '"')
+    ):
+        value = value[1:-1]
+
+    config[key] = value
+
+
+token = config.get(
+    "TOKEN",
+    "",
+).strip()
+
+admin_id = config.get(
+    "ADMIN_ID",
+    "",
+).strip()
+
+
+if not re.fullmatch(
+    r"[0-9]+:[A-Za-z0-9_-]+",
+    token,
+):
+    raise SystemExit(1)
+
+
+if not re.fullmatch(
+    r"-?[0-9]+",
+    admin_id,
+):
+    raise SystemExit(1)
+
+
+raise SystemExit(0)
+PY
+}
+
+
+TELEGRAM_CONFIG_READY=0
+
+
+if [ -f "$TELEGRAM_CONFIG" ]; then
+
+    if telegram_config_is_valid         "$TELEGRAM_CONFIG"; then
+
+        echo "Configuração Telegram existente preservada:"
+        echo "  $TELEGRAM_CONFIG"
+
+        TELEGRAM_CONFIG_READY=1
 
     else
 
+        echo "Configuração Telegram existente está vazia ou inválida."
+        echo "Ela será substituída somente após uma configuração válida."
+    fi
+fi
+
+
+if [ "$TELEGRAM_CONFIG_READY" -eq 0 ]; then
+
+    # ------------------------------------------------------------
+    # Compatibilidade com instalação antiga.
+    # ------------------------------------------------------------
+
+    if [ -f "${SCRIPT_DIR}/app/bot_telegram.conf" ]; then
+
+        echo "Migrando configuração Telegram antiga..."
+
+        cp \
+            "${SCRIPT_DIR}/app/bot_telegram.conf" \
+            "$TELEGRAM_CONFIG"
+
+        chmod 600 "$TELEGRAM_CONFIG"
+
+    # ------------------------------------------------------------
+    # Instalação automatizada / não interativa.
+    # ------------------------------------------------------------
+
+    elif [ -n "${WOLF_PORTAL_TELEGRAM_TOKEN:-}" ] &&
+         [ -n "${WOLF_PORTAL_TELEGRAM_ADMIN_ID:-}" ]; then
+
+        if ! validate_telegram_token \
+            "$WOLF_PORTAL_TELEGRAM_TOKEN"; then
+
+            fail \
+                "WOLF_PORTAL_TELEGRAM_TOKEN possui formato inválido."
+        fi
+
+        if ! validate_telegram_admin_id \
+            "$WOLF_PORTAL_TELEGRAM_ADMIN_ID"; then
+
+            fail \
+                "WOLF_PORTAL_TELEGRAM_ADMIN_ID possui formato inválido."
+        fi
+
+        write_telegram_config \
+            "$WOLF_PORTAL_TELEGRAM_TOKEN" \
+            "$WOLF_PORTAL_TELEGRAM_ADMIN_ID"
+
+        echo "Configuração Telegram criada através de variáveis de ambiente."
+
+    # ------------------------------------------------------------
+    # Instalação interativa.
+    # ------------------------------------------------------------
+
+    else
+
+        if [ ! -t 0 ]; then
+
+            fail \
+                "Telegram não configurado. " \
+                "Em instalação não interativa, defina " \
+                "WOLF_PORTAL_TELEGRAM_TOKEN e " \
+                "WOLF_PORTAL_TELEGRAM_ADMIN_ID."
+        fi
+
         echo
-        echo "Telegram ainda não configurado."
+        echo "================================================"
+        echo " CONFIGURANDO TELEGRAM"
+        echo "================================================"
         echo
-        echo "Crie:"
+        echo "O Telegram é necessário para administrar"
+        echo "dispositivos no Wolf Portal."
         echo
+
+        while :; do
+
+            printf "Token do bot Telegram: "
+
+            # BusyBox ash/OpenWrt suporta read -s.
+            IFS= read -r TELEGRAM_TOKEN_INPUT
+
+            echo
+
+            if validate_telegram_token \
+                "$TELEGRAM_TOKEN_INPUT"; then
+
+                break
+            fi
+
+            echo
+            echo "Token inválido."
+            echo "Formato esperado: 123456789:AA..."
+            echo
+        done
+
+        while :; do
+
+            printf "ID Telegram do administrador: "
+
+            IFS= read -r TELEGRAM_ADMIN_ID_INPUT
+
+            if validate_telegram_admin_id \
+                "$TELEGRAM_ADMIN_ID_INPUT"; then
+
+                break
+            fi
+
+            echo
+            echo "ID inválido. Informe somente o ID numérico."
+            echo
+        done
+
+        write_telegram_config \
+            "$TELEGRAM_TOKEN_INPUT" \
+            "$TELEGRAM_ADMIN_ID_INPUT"
+
+        unset TELEGRAM_TOKEN_INPUT
+        unset TELEGRAM_ADMIN_ID_INPUT
+
+        echo
+        echo "Configuração Telegram criada:"
         echo "  $TELEGRAM_CONFIG"
-        echo
-        echo "com:"
-        echo
-        echo '  TOKEN="..."'
-        echo '  ADMIN_ID="..."'
     fi
 fi
 
